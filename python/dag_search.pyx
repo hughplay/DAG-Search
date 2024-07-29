@@ -92,16 +92,16 @@ def dag_search(float[:, :, ::1] dagscores, int[:, :, ::1] nextstep_idx,
             update_time += start2 - start
             expand_time += start3 - start
 
-    result = np.zeros((batch_size, prelen), dtype=np.intc)
-    score = np.zeros((batch_size), dtype=np.float32)
+    result = np.zeros((batch_size, beam_size, prelen), dtype=np.intc)
+    score = np.zeros((batch_size, beam_size), dtype=np.float32)
     if SearchBeam.__debug_flag:
         printf("dag_search: before traverse\n")
-    traverse_beam(batch_size, pad_id, result, score, dedup)
+    traverse_beam(batch_size, pad_id, result, score, beam_size, dedup)
     if SearchBeam.__debug_flag:
         printf("dag_search: after traverse\n")
         print(f"init_time {init_time} update_time {update_time}, expand_time {expand_time}")
-    output_len = (result != pad_id).sum(axis=-1).max()
-    return result[:, :output_len], score
+    output_len = (result != pad_id).sum(axis=-1).max(axis=-1).max()
+    return result[:, :, :output_len], score
 
 @cython.wraparound(False)
 @cython.boundscheck(False)
@@ -178,35 +178,35 @@ cdef void get_beam(int batch_size, int step, int[::1] output_length,
 
 @cython.wraparound(False)
 @cython.boundscheck(False)
-cdef void traverse_beam(int batch_size, int pad_id, int[:, ::1] result, float[::1] score, int dedup) nogil:
-    cdef int i
+cdef void traverse_beam(int batch_size, int pad_id, int[:, :, ::1] result, float[:, ::1] score, int beam_size, int dedup) nogil:
+    cdef int i, k
     cdef pair[float, SearchNode_pt] node_pair
     for i in prange(batch_size, nogil=True, schedule="guided"):
-        node_pair = deref(beams[i * SearchBeam.max_pos])[0]
-        score[i] = node_pair.first
-        traverse_beam_single(node_pair.second, i, pad_id, result, dedup)
-
+        for k in range(beam_size):
+            node_pair = deref(beams[i * SearchBeam.max_pos])[k]
+            score[i, k] = node_pair.first
+            traverse_beam_single(node_pair.second, i, k, pad_id, result, dedup)
 
 @cython.wraparound(False)
 @cython.boundscheck(False)
-cdef void traverse_beam_single(SearchNode* beam, int batch, int pad_id, int[:, ::1] result, int dedup) nogil:
-    cdef int length = result.shape[1]
+cdef void traverse_beam_single(SearchNode* beam, int batch, int beam_idx, int pad_id, int[:, :, ::1] result, int dedup) nogil:
+    cdef int length = result.shape[2]
     cdef int pos, i
 
     pos = length - 1
     while beam != <SearchBeam.SearchNode*>0:
-        result[batch, pos] = beam.word
+        result[batch, beam_idx, pos] = beam.word
         pos -= 1
         beam = beam.parent
     i = 0
     pos += 1
     while pos < length:
-        if dedup > 0 and i > 0 and result[batch, i - 1] == result[batch, pos]:
+        if dedup > 0 and i > 0 and result[batch, beam_idx, i - 1] == result[batch, beam_idx, pos]:
             pos += 1
         else:
-            result[batch, i] = result[batch, pos]
+            result[batch, beam_idx, i] = result[batch, beam_idx, pos]
             i += 1
             pos += 1
     while i < length:
-        result[batch, i] = pad_id
+        result[batch, beam_idx, i] = pad_id
         i += 1
